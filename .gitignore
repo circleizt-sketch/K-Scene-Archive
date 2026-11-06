@@ -1,0 +1,7 @@
+.preview/
+.test-results/
+node_modules/
+.clasp.json
+.env
+.env.*
+!.env.example

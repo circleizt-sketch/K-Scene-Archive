@@ -1,0 +1,334 @@
+<script>
+'use strict';
+(() => {
+  const $ = s => document.querySelector(s);
+  const state = { gallery:{teams:[],cards:[]}, team:'all', tag:'', search:'', sort:'latest', session:null, workspace:null, page:'gallery', editorDirty:false, loadingGallery:false };
+  const statusNames = {draft:'작성 중',submitted:'이전 제출',revision:'이전 수정 요청',published:'공개',archived:'보관'};
+  const analysisFields = [['context','① 상황 맥락'],['relationship','화자와 청자의 관계'],['mainExpression','② 주요 대사 및 표현'],['discourseAnalysis','③ 담화 및 화용 분석'],['nonverbalAnalysis','④ 비언어적 표현'],['culturalContext','⑤ 한국 문화적 맥락'],['learningPoint','⑥ 한국어 학습 포인트']];
+  let toastTimer, lastViewerFocus, fieldSequence=0;
+
+  /** 사용자 입력은 textContent/속성으로만 렌더링합니다. */
+  function el(tag, attrs={}, ...children) {
+    const node=document.createElement(tag);
+    Object.entries(attrs).forEach(([key,value]) => {
+      if (value === undefined || value === null) return;
+      if (key === 'class') node.className=value;
+      else if (key === 'text') node.textContent=value;
+      else if (key.startsWith('on')) node.addEventListener(key.slice(2),value);
+      else if (key === 'checked' || key === 'disabled' || key === 'hidden') node[key]=value;
+      else node.setAttribute(key,String(value));
+    });
+    children.flat(Infinity).forEach(child => { if(child !== null && child !== undefined) node.append(child instanceof Node ? child : document.createTextNode(String(child))); });
+    return node;
+  }
+  const button=(text,cls,fn,attrs={})=>el('button',{type:'button',class:cls,onclick:fn,...attrs},text);
+  const badge=c=>el('span',{class:'status-chip status-'+c.status},statusNames[c.status]||c.status);
+  const teamName=id=>(state.gallery.teams.find(t=>t.teamId===id)||state.workspace?.teams.find(t=>t.teamId===id))?.teamName||id;
+  const formatDate=s=>s ? new Date(s).toLocaleDateString('ko-KR',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}) : '';
+
+  /** google.script.run을 Promise로 감싸 오류와 처리 지연을 일관되게 안내합니다. */
+  function api(name,...args) {
+    if(window.KSC_PREVIEW) return window.KSC_PREVIEW.call(name,...args);
+    return new Promise((resolve,reject)=>{
+      if(!window.google?.script?.run) { reject(new Error('Apps Script 웹 앱에서 실행하거나 README의 로컬 미리보기를 사용해 주세요.')); return; }
+      const timer=setTimeout(()=>{ const e=new Error('응답이 지연되고 있습니다. 저장 요청은 이미 처리되었을 수 있으므로 입력 내용을 복사하고 목록을 새로고침해 확인해 주세요.');e.code='UNCERTAIN';reject(e); },45000);
+      google.script.run.withSuccessHandler(result=>{
+        clearTimeout(timer);
+        if(result?.ok) resolve(result.data);
+        else { const e=new Error(result?.error?.message||'서버 응답을 확인할 수 없습니다.');e.code=result?.error?.code;reject(e); }
+      }).withFailureHandler(()=>{clearTimeout(timer);const e=new Error('연결을 확인할 수 없습니다. 저장이 처리되었을 수 있으니 입력 내용을 복사하고 목록에서 확인해 주세요.');e.code='UNCERTAIN';reject(e);})[name](...args);
+    });
+  }
+  function toast(message,error=false) { clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').className='toast'+(error?' error':'');$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,error?9000:4000); }
+  function showError(error,target) {
+    if(target) { target.textContent=error.message; target.hidden=false; target.focus(); }
+    else toast(error.message,true);
+    if(error.code==='AUTH') { clearSession();toast(error.message,true); }
+  }
+  function saveSession(s) { state.workspace=null;$('#workspace-page').replaceChildren();$('#admin-page').replaceChildren();state.session=s;try{sessionStorage.setItem('kscene-session',JSON.stringify(s));}catch(e){}$('#logout').hidden=!s; }
+  function clearSession() { state.session=null;state.workspace=null;$('#workspace-page').replaceChildren();$('#admin-page').replaceChildren();if($('#viewer').open)closeViewer();try{sessionStorage.removeItem('kscene-session');}catch(e){}$('#logout').hidden=true; }
+  function restoreSession() {try{const s=JSON.parse(sessionStorage.getItem('kscene-session'));if(s?.token&&s.expiresAt>Date.now()) saveSession(s);else clearSession();}catch(e){clearSession();} }
+
+  /** 일반 URL·Shorts·단축 주소를 검사한 뒤 안전한 임베드 URL을 만듭니다. */
+  function videoInfo(value) {
+    let u;try{u=new URL(value);}catch(e){throw new Error('올바른 YouTube URL을 입력해 주세요.');}
+    if(u.protocol!=='https:'||u.username||u.password||u.port||!['youtube.com','www.youtube.com','m.youtube.com','youtu.be','www.youtu.be','m.youtu.be'].includes(u.hostname)) throw new Error('https://로 시작하는 YouTube 링크만 지원합니다.');
+    let id;if(u.hostname.endsWith('youtu.be'))id=u.pathname.slice(1);else if(u.pathname==='/watch')id=u.searchParams.get('v');else if(/^\/(shorts|embed)\//.test(u.pathname))id=u.pathname.split('/')[2];
+    if(!/^[\w-]{11}$/.test(id||''))throw new Error('영상 ID를 확인해 주세요. 일반 영상·Shorts·단축 URL을 지원합니다.');
+    const t=u.searchParams.get('t')||u.searchParams.get('start')||'0';let start=0;
+    if(/^\d+$/.test(t))start=Number(t);else{const m=t.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);if(!m||!t)throw new Error('시작 시간은 초 또는 1m30s 형식으로 입력해 주세요.');start=Number(m[1]||0)*3600+Number(m[2]||0)*60+Number(m[3]||0);}
+    if(!Number.isSafeInteger(start)||start>604800)throw new Error('영상 시작 시간 범위를 확인해 주세요.');
+    return {id,start,url:'https://www.youtube.com/watch?v='+id+(start?'&t='+start:''),embed:'https://www.youtube.com/embed/'+id+'?start='+start+'&rel=0'};
+  }
+  let youtubePromise;
+  const videoPlayers=new Map();
+  /** 무료 IFrame API의 오류 이벤트를 받을 수 있으면 플레이어를 원본 안내로 바꿉니다. */
+  function youtubeApi() {
+    if(window.YT?.Player)return Promise.resolve(window.YT);
+    if(youtubePromise)return youtubePromise;
+    youtubePromise=new Promise(resolve=>{
+      let done=false;
+      const finish=value=>{if(!done){done=true;resolve(value);}};
+      window.onYouTubeIframeAPIReady=()=>finish(window.YT);
+      const script=el('script',{src:'https://www.youtube.com/iframe_api',onerror:()=>finish(null)});
+      document.head.append(script);setTimeout(()=>finish(null),8000);
+    });
+    return youtubePromise;
+  }
+  function cleanupVideos() {
+    videoPlayers.forEach((player,frame)=>{if(!frame.isConnected){try{player.destroy();}catch(e){}videoPlayers.delete(frame);}});
+  }
+  function videoBlock(url) {
+    cleanupVideos();
+    try {
+      const v=videoInfo(url);
+      const frame=el('iframe',{src:v.embed+'&enablejsapi=1&origin='+encodeURIComponent(location.origin),title:'YouTube 영상 플레이어',loading:'lazy',allow:'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share',allowfullscreen:'',referrerpolicy:'strict-origin-when-cross-origin'});
+      const area=el('div',{class:'video-frame'},frame);
+      const link=el('a',{href:v.url,target:'_blank',rel:'noopener noreferrer'},'원본 영상 열기 ↗');
+      const block=el('div',{},area,el('p',{class:'video-help'},'영상이 재생되지 않거나 임베드가 제한되어 있나요?',link));
+      youtubeApi().then(YT=>{
+        if(!YT||!frame.isConnected)return;
+        try {
+          const player=new YT.Player(frame,{events:{onError:()=>{
+            area.replaceChildren(el('div',{class:'video-unavailable',role:'status'},el('p',{},'이 영상은 여기에서 재생할 수 없습니다.'),el('a',{href:v.url,target:'_blank',rel:'noopener noreferrer',class:'secondary'},'YouTube에서 원본 영상 열기 ↗')));
+            cleanupVideos();
+          }}});
+          videoPlayers.set(frame,player);
+        } catch(e) { /* API가 제한되어도 iframe과 원본 링크는 그대로 이용할 수 있습니다. */ }
+      });
+      return block;
+    } catch(e) {return el('p',{class:'inline-error'},e.message);}
+  }
+
+  /** 전체/팀별 화면 모두 팀 구획을 유지하며 필터와 정렬을 적용합니다. */
+  function renderGallery() {
+    const {teams,cards}=state.gallery;
+    if(state.team!=='all'&&!teams.some(t=>t.teamId===state.team))state.team='all';
+    $('#hero-count').textContent=teams.length+'개 팀 · '+cards.length+'개의 장면';$('#collection-count').textContent=cards.length;
+    $('#team-tabs').replaceChildren(...[{teamId:'all',teamName:'전체'},...teams].map(makeTab));
+    function makeTab(t,i){return el('button',{type:'button',class:'tab'+(state.team===t.teamId?' active':''),'aria-pressed':state.team===t.teamId,onclick:()=>{state.team=t.teamId;renderGallery();}},t.teamId==='all'?'전체':String(t.sortOrder)+'팀',' ',el('span',{},t.teamId==='all'?cards.length:cards.filter(c=>c.teamId===t.teamId).length));}
+    const tags=[...new Set(cards.flatMap(c=>c.tags))].sort((a,b)=>a.localeCompare(b,'ko'));
+    if(state.tag&&!tags.includes(state.tag))state.tag='';
+    $('#tag-filters').replaceChildren(...['',...tags].map(t=>button(t?'#'+t:'모든 태그','tag-filter'+(state.tag===t?' active':''),()=>{state.tag=t;renderGallery();},{'aria-pressed':state.tag===t})));
+    let total=0;
+    const groups=teams.filter(t=>state.team==='all'||t.teamId===state.team).map(team=>{
+      const all=cards.filter(c=>c.teamId===team.teamId);
+      const found=all.filter(c=>(!state.tag||c.tags.includes(state.tag))&&(!state.search||[c.title,...c.tags].some(s=>s.toLocaleLowerCase().includes(state.search)))).sort((a,b)=>state.sort==='title'?a.title.localeCompare(b.title,'ko'):(b.publishedAt||'').localeCompare(a.publishedAt||'')||b.cardId.localeCompare(a.cardId));
+      total+=found.length;
+      return el('section',{class:'team-group','aria-label':team.teamName},el('div',{class:'team-heading'},el('h3',{},el('span',{class:'team-number'},team.sortOrder+'팀'),team.teamName,el('span',{class:'team-count'},'공개 '+all.length+'개'+(found.length!==all.length?' · 검색 '+found.length+'개':''))),button('팀 전체 보기 →','team-all',()=>{state.team=team.teamId;state.tag='';state.search='';$('#search').value='';renderGallery();})),found.length?el('div',{class:'card-grid'},found.map(c=>galleryCard(c,team))):el('div',{class:'empty-group'},all.length?'조건에 맞는 장면이 없어요. 검색어나 태그를 바꿔 보세요.':'아직 공개된 장면이 없어요. 이 팀의 첫 장면을 기다려 주세요.'));
+    });
+    $('#team-groups').replaceChildren(...groups);
+    const message=$('#gallery-status');message.replaceChildren();message.hidden=!!teams.length;
+    if(!teams.length)message.textContent='아직 등록된 팀이 없어요. 교수자에게 문의해 주세요.';
+    $('#collection-count').textContent=total;
+  }
+  function galleryCard(c,team) {
+    let id='';try{id=videoInfo(c.videoUrl).id;}catch(e){}
+    const fallback=el('div',{class:'thumbnail-fallback','aria-hidden':'true'},'K : SCENE');
+    // 네트워크에서 한 도메인이 제한된 경우 다른 공식 썸네일 주소를 순서대로 시도합니다.
+    const sources=id?['https://i.ytimg.com/vi/'+id+'/hqdefault.jpg','https://img.youtube.com/vi/'+id+'/hqdefault.jpg','https://i.ytimg.com/vi/'+id+'/mqdefault.jpg']:[];
+    let sourceIndex=0;
+    const image=el('img',{alt:c.contentTitle+' 영상 썸네일',loading:'lazy',referrerpolicy:'no-referrer',onload:()=>{fallback.hidden=true;},onerror:()=>{
+      if(++sourceIndex<sources.length)image.src=sources[sourceIndex];else{image.hidden=true;fallback.hidden=false;}
+    }});
+    if(sources.length)image.src=sources[0];else image.hidden=true;
+    const thumb=el('div',{class:'thumbnail'},fallback,image,el('span',{},c.contentTitle),el('div',{class:'play-mark','aria-hidden':'true'},'▶'));
+    return el('article',{class:'scene-card'},thumb,el('div',{class:'card-body'},el('div',{class:'card-topline'},el('span',{},team.teamName),el('span',{},formatDate(c.publishedAt))),el('h4',{title:c.title},c.title),el('p',{class:'card-description'},c.description),el('div',{class:'chips'},c.tags.map(t=>el('span',{class:'chip'},'#'+t))),el('div',{class:'card-footer'},el('button',{type:'button',class:'view-button',onclick:()=>openCard(c),'aria-label':c.title+' 카드 살펴보기'},'카드 살펴보기',el('span',{'aria-hidden':'true'},'↗')))));
+  }
+  async function loadGallery(silent=false) {
+    if(state.loadingGallery)return;
+    state.loadingGallery=true;
+    try{state.gallery=await api('getGallery');renderGallery();}
+    catch(e){if(!silent){$('#gallery-status').hidden=false;$('#gallery-status').replaceChildren(el('p',{},e.message),button('다시 불러오기','secondary',()=>loadGallery()));}else toast('갤러리를 갱신하지 못했습니다. 잠시 후 다시 확인해 주세요.',true);}
+    finally{state.loadingGallery=false;}
+  }
+
+  /** 모달은 dialog 기본 포커스 트랩과 Escape 닫기를 사용합니다. */
+  function openViewer(label) {lastViewerFocus=document.activeElement;$('#viewer-label').textContent=label;$('#viewer-content').replaceChildren();if(!$('#viewer').open)$('#viewer').showModal();$('#viewer').scrollTop=0;}
+  function closeViewer() {$('#viewer').close();$('#viewer-content').replaceChildren();cleanupVideos();lastViewerFocus?.focus();}
+  function flip(inner,back) {
+    const front=inner.querySelector('.card-front'),rear=inner.querySelector('.card-back');
+    front.setAttribute('aria-hidden',String(back));front.inert=back;rear.setAttribute('aria-hidden',String(!back));rear.inert=!back;inner.classList.toggle('flipped',back);$('#viewer').scrollTop=0;
+    setTimeout(()=>{(back?rear:front).querySelector('h2')?.focus();},window.matchMedia('(prefers-reduced-motion: reduce)').matches?0:510);
+  }
+  function analysisCard(c,result) {
+    const node=el('div',{},el('p',{class:'scene-content'},c.contentTitle),el('h2',{class:'scene-title',tabindex:'-1'},c.title));
+    if(result)node.append(el('div',{class:'result-banner'},el('b',{},result.correct?'좋아요! 상황과 관계를 고려해 적절한 표현을 선택했어요.':'다른 표현도 가능하지만, 이 상황에서는 상대와의 관계를 고려할 필요가 있어요.'),el('p',{},'내가 고른 답: '+result.chosenChoiceId+' · 정답: '+c.correctChoiceId)));
+    analysisFields.forEach(([key,title])=>node.append(el('section',{class:'analysis-section'},el('h3',{},title),el('p',{},c[key]||'아직 작성하지 않았습니다.'))));
+    const answer=c.quizOptions.find(o=>o.id===c.correctChoiceId);
+    node.append(el('section',{class:'analysis-section'},el('h3',{},'⑦ 퀴즈 정답 및 해설'),el('p',{},'정답: '+(answer?answer.id+'. '+answer.text:'미선택')),el('p',{},c.quizExplanation||'해설을 작성해 주세요.')));
+    return node;
+  }
+  function openCard(c,preview=false) {
+    openViewer(preview?'WORKSPACE PREVIEW · 저장 전 미리보기':'SCENE EXPLORER · '+teamName(c.teamId));
+    const front=el('section',{class:'card-face card-front','aria-hidden':'false'}),back=el('section',{class:'card-face card-back','aria-hidden':'true'});back.inert=true;
+    const inner=el('div',{class:'flip-inner'},front,back);
+    if(preview)front.append(el('p',{class:'preview-note'},'내 팀의 작성 내용 미리보기입니다. 저장·제출되지 않으며 정답은 입력한 값을 기준으로 확인합니다.'));
+    front.append(videoBlock(c.videoUrl),el('p',{class:'scene-content'},c.contentTitle||'콘텐츠명 미입력'),el('h2',{class:'scene-title',tabindex:'-1'},c.title||'제목 없는 카드'),el('p',{class:'scene-description'},c.description||'장면과 상황적 배경을 입력해 주세요.'));
+    const quiz=el('form',{class:'quiz-box'}),error=el('p',{class:'inline-error',role:'alert',tabindex:'-1',hidden:true});
+    const field=el('fieldset',{},el('legend',{},'SCENE QUIZ · 상황에 어울리는 표현'),el('h3',{},c.quizQuestion||'퀴즈 질문 미입력'));
+    c.quizOptions.forEach(o=>field.append(el('label',{class:'choice'},el('input',{type:'radio',name:'choice',value:o.id,required:true}),el('span',{},o.id+'. '+(o.text||'선택지 미입력')))));
+    const submit=el('button',{type:'submit',class:'primary'},'정답 확인 및 카드 뒤집기 ↻');quiz.append(field,error,submit);front.append(quiz);
+    quiz.addEventListener('submit',async e=>{
+      e.preventDefault();const choice=new FormData(quiz).get('choice');if(!choice)return;submit.disabled=true;error.hidden=true;
+      try{
+        const result=preview?{correct:choice===c.correctChoiceId,chosenChoiceId:choice,card:c}:await api('submitQuiz',c.cardId,choice,Number(c.version));
+        if(!inner.isConnected)return;
+        back.replaceChildren(analysisCard(result.card,result),el('div',{class:'back-actions'},button('← 장면 다시 보기','secondary',()=>flip(inner,false)),button('닫기','text-button',closeViewer)));
+        flip(inner,true);
+      }catch(err){if(inner.isConnected)showError(err,error);}finally{submit.disabled=false;}
+    });
+    $('#viewer-content').append(el('div',{class:'flip-stage'},inner));
+  }
+
+  /** 메뉴 변경 전 저장하지 않은 입력을 보호합니다. */
+  async function navigate(page) {
+    if(state.editorDirty&&!confirm('저장하지 않은 내용이 있습니다. 이 화면을 나갈까요?'))return;
+    state.editorDirty=false;state.page=page==='teams'?'gallery':page;
+    document.querySelectorAll('main>section').forEach(s=>s.hidden=true);
+    document.querySelectorAll('[data-nav]').forEach(b=>b.classList.toggle('active',b.dataset.nav===page));
+    if(page==='gallery'||page==='teams') {$('#gallery-page').hidden=false;if(page==='teams')$('#collection-title').scrollIntoView({behavior:'smooth'});await loadGallery(true);return;}
+    if(!state.session||state.session.expiresAt<=Date.now()||(page==='admin'&&state.session.role!=='admin')||(page==='workspace'&&state.session.role!=='team')){renderLogin(page);return;}
+    await loadWorkspace(page);
+  }
+  function errorBox(){return el('p',{class:'inline-error',role:'alert',tabindex:'-1',hidden:true});}
+  function field(label,name,value='',type='text',required=false) {
+    const input=el(type==='textarea'?'textarea':'input',{name,id:'field-'+name+'-'+(++fieldSequence),...(type!=='textarea'?{type}:{}),required:required?'':null,maxlength:type==='textarea'?6000:160});
+    input.value=value;
+    return el('label',{class:'form-field'},label+(required?' *':''),input);
+  }
+  function selectField(label,name,items,value) {
+    const select=el('select',{name,id:'field-'+name+'-'+(++fieldSequence)},items.map(([v,l])=>el('option',{value:v},l)));select.value=value;
+    return el('div',{class:'form-field'},el('label',{for:select.id},label),select);
+  }
+  function renderLogin(page) {
+    const panel=$('#login-page');panel.hidden=false;
+    const admin=page==='admin',form=el('form',{class:'login-panel'}),error=errorBox();
+    form.append(el('p',{class:'eyebrow'},admin?'TEACHER SPACE':'TEAM WORKSPACE'),el('h1',{},admin?'교수자 관리':'우리 팀의 장면을 기록해요'),el('p',{class:'help-text'},admin?'교수자 전용 관리 코드를 입력해 주세요.':'팀을 선택하고 교수자가 발급한 편집 코드를 입력해 주세요.'));
+    if(!admin)form.append(selectField('우리 팀','teamId',state.gallery.teams.map(t=>[t.teamId,t.sortOrder+'팀 · '+t.teamName]),state.gallery.teams[0]?.teamId||''));
+    const codeField=field(admin?'관리자 코드':'팀 편집 코드','code','','password',true);codeField.style.marginTop='22px';codeField.querySelector('input').maxLength=128;codeField.querySelector('input').autocomplete='current-password';form.append(codeField,error);
+    const submit=el('button',{type:'submit',class:'primary'},'입장하기 →');form.append(submit,el('p',{class:'session-note'},'로그인은 최대 6시간 유지됩니다. 공동 기기에서는 사용 후 로그아웃해 주세요.'));
+    panel.replaceChildren(form);
+    form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;error.hidden=true;const data=new FormData(form);try{const s=await api('login',admin?'admin':'team',data.get('teamId'),data.get('code'));saveSession(s);form.reset();panel.hidden=true;await loadWorkspace(page);}catch(err){showError(err,error);}finally{submit.disabled=false;}});
+  }
+  async function loadWorkspace(page) {
+    const panel=$('#'+page+'-page');panel.hidden=false;panel.replaceChildren(el('p',{class:'state-message'},'작업 내용을 불러오는 중입니다…'));
+    const token=state.session.token;
+    try{const workspace=await api('getWorkspace',token);if(state.session?.token!==token||state.page!==page)return;state.workspace=workspace;if(page==='admin')renderAdmin();else renderWorkspace();}
+    catch(e){panel.replaceChildren(el('p',{class:'inline-error'},e.message),button('다시 로그인','secondary',()=>renderLogin(page)),button('다시 불러오기','secondary',()=>navigate(page)));showError(e);}
+  }
+  function pageHeading(title,description,actions=[]) {return el('div',{class:'page-heading'},el('div',{},el('p',{class:'eyebrow'},'K-SCENE WORKSPACE'),el('h1',{},title),el('p',{},description)),el('div',{class:'item-actions'},actions));}
+  function renderWorkspace() {
+    state.editorDirty=false;
+    const panel=$('#workspace-page'),cards=state.workspace.cards;
+    panel.replaceChildren(pageHeading(teamName(state.session.teamId)+' 작업실','완성한 카드는 바로 공개할 수 있어요. 교수자 코멘트는 우리 팀 작업실에서만 확인합니다.',[button('목록 새로고침','secondary',()=>loadWorkspace('workspace')),button('+ 새 카드 만들기','primary',()=>renderEditor())]));
+    const list=el('div',{class:'workspace-list'});
+    cards.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)).forEach(c=>list.append(el('article',{class:'work-item'},el('div',{},badge(c),el('h3',{},c.title||'제목 없는 카드'),el('p',{},'최근 저장 '+formatDate(c.updatedAt)+' · 버전 '+c.version),c.teacherFeedback?el('p',{},'교수자 비공개 코멘트: '+c.teacherFeedback):null),el('div',{class:'item-actions'},button(['draft','submitted','revision','published'].includes(c.status)?'카드 편집':'내용 확인','secondary',()=>renderEditor(c))))));
+    if(!cards.length)list.append(el('p',{class:'empty-group'},'아직 작성한 카드가 없어요. 첫 번째 장면을 기록해 보세요.'));
+    panel.append(list);
+  }
+  const emptyCard=()=>({teamId:state.session.teamId,title:'',contentTitle:'',videoUrl:'',description:'',tags:[],quizOptions:[{id:'A',text:''},{id:'B',text:''},{id:'C',text:''}],correctChoiceId:''});
+  /** 작성·미리보기·부분 저장·최종 제출을 한 양식에서 처리합니다. */
+  function renderEditor(existing) {
+    const c=existing?structuredClone(existing):emptyCard();const editable=!existing||['draft','submitted','revision','published'].includes(c.status);
+    const panel=$('#workspace-page'),form=el('form',{novalidate:''}),error=errorBox();
+    panel.replaceChildren(pageHeading(existing?'카드 '+(editable?'편집':'확인'):'새로운 장면 기록하기','차근차근 기록해 보세요. 임시저장은 빈 항목이 있어도 괜찮아요.',[button('← 작업실 목록','secondary',async()=>{if(state.editorDirty&&!confirm('저장하지 않은 내용을 남겨 두고 목록으로 갈까요?'))return;state.editorDirty=false;await loadWorkspace('workspace');})]));
+    if(c.teacherFeedback)form.append(el('div',{class:'feedback-box'},el('b',{},'교수자 코멘트 · 우리 팀만 볼 수 있어요\n'),c.teacherFeedback));
+    if(existing)form.append(badge(c));
+    if(!editable)form.append(el('p',{class:'preview-note'},'보관된 카드는 읽기만 가능합니다. 교수자에게 보관 해제를 요청해 주세요.'));
+    const basic=el('section',{class:'editor-section'},el('p',{class:'eyebrow'},'01 · THE SCENE'),el('h2',{},'장면을 소개해 주세요'),el('div',{class:'field-grid'},field('카드 제목','title',c.title,'text',true),field('콘텐츠명','contentTitle',c.contentTitle,'text',true)),field('YouTube 영상 URL','videoUrl',c.videoUrl,'text',true));
+    const vInput=basic.querySelector('[name=videoUrl]');vInput.maxLength=600;vInput.placeholder='https://www.youtube.com/watch?v=…&t=30';
+    const videoPreview=el('div',{class:'editor-preview'});let videoTimer;
+    function updateVideo(){videoPreview.replaceChildren(...(vInput.value?[videoBlock(vInput.value)]:[]));}
+    vInput.addEventListener('input',()=>{clearTimeout(videoTimer);videoTimer=setTimeout(updateVideo,600);});updateVideo();
+    basic.append(el('p',{class:'help-text'},'시작 시간은 URL 끝에 &t=30(30초), &t=1m30s처럼 지정할 수 있습니다. 직접 제작했거나 수업 이용이 허용된 콘텐츠를 사용해 주세요.'),videoPreview,field('장면 소개 및 영상의 상황적 배경','description',c.description,'textarea',true),field('핵심 태그 (쉼표로 구분 · 최대 3개)','tags',c.tags.join(', ')));
+    basic.querySelector('[name=tags]').maxLength=94;
+    const analysis=el('section',{class:'editor-section'},el('p',{class:'eyebrow'},'02 · BEYOND THE WORDS'),el('h2',{},'말 너머의 의미를 분석해요'));
+    analysisFields.forEach(([key,label])=>analysis.append(field(label,key,c[key]||'','textarea')));
+    const quiz=el('section',{class:'editor-section'},el('p',{class:'eyebrow'},'03 · THINK TOGETHER'),el('h2',{},'함께 풀어볼 질문을 만들어요'),field('퀴즈 질문','quizQuestion',c.quizQuestion||'','textarea',true));
+    let optionsCount=c.quizOptions.length;
+    const options=el('div'),correct=selectField('정답 선택','correctChoiceId',[['','정답을 선택해 주세요'],...c.quizOptions.map(o=>[o.id,o.id+' 선택지'])],c.correctChoiceId);
+    function drawOptions(values){options.replaceChildren(...values.map((v,i)=>field(String.fromCharCode(65+i)+' 선택지','option'+i,v,'textarea',true)));options.querySelectorAll('textarea').forEach(n=>{n.maxLength=1000;n.style.minHeight='65px';});}
+    drawOptions(c.quizOptions.map(o=>o.text));
+    const toggle=button(optionsCount===3?'+ D 선택지 추가':'D 선택지 제거','text-button',()=>{
+      const values=[...options.querySelectorAll('textarea')].map(i=>i.value);if(optionsCount===3){values.push('');optionsCount=4;}else{values.pop();optionsCount=3;}
+      drawOptions(values);const select=correct.querySelector('select'),value=select.value;select.replaceChildren(el('option',{value:''},'정답을 선택해 주세요'),...values.map((v,i)=>el('option',{value:String.fromCharCode(65+i)},String.fromCharCode(65+i)+' 선택지')));select.value=value==='D'&&optionsCount===3?'':value;toggle.textContent=optionsCount===3?'+ D 선택지 추가':'D 선택지 제거';state.editorDirty=true;
+    });
+    quiz.append(options,toggle,correct,field('정답 해설','quizExplanation',c.quizExplanation||'','textarea',true));
+    form.append(basic,analysis,quiz,error);
+    const actions=el('div',{class:'editor-actions'}),preview=button('미리보기','secondary',()=>{try{openCard(readForm(),true);}catch(e){showError(e,error);}});
+    actions.append(preview);
+    if(editable){actions.append(button(c.status==='published'?'비공개로 저장':'임시저장','secondary',()=>save('draft')),button(c.status==='published'?'수정 내용 공개 →':'카드 공개 →','primary',()=>save('publish')));if(c.status==='draft')actions.prepend(button('삭제','danger-button',async()=>{if(!confirm('이 작성 중 카드를 삭제할까요?'))return;setBusy(true);try{await api('deleteCard',state.session.token,c.cardId,Number(c.version));state.editorDirty=false;await loadWorkspace('workspace');toast('카드를 삭제했습니다.');}catch(e){showError(e,error);setBusy(false);}}));}
+    else form.querySelectorAll('input,textarea,select').forEach(i=>i.disabled=true);
+    if(!editable)toggle.disabled=true;
+    form.append(actions);panel.append(form);
+    form.addEventListener('submit',e=>e.preventDefault());form.addEventListener('input',()=>{if(editable)state.editorDirty=true;});form.addEventListener('change',()=>{if(editable)state.editorDirty=true;});
+    function readForm(){const out={...c};form.querySelectorAll('[name]').forEach(n=>{if(!n.name.startsWith('option'))out[n.name]=n.value.trim();});out.tags=out.tags.split(',').map(t=>t.trim()).filter(Boolean);out.quizOptions=[...options.querySelectorAll('textarea')].map((n,i)=>({id:String.fromCharCode(65+i),text:n.value.trim()}));return out;}
+    function setBusy(busy){actions.querySelectorAll('button').forEach(b=>b.disabled=busy);form.setAttribute('aria-busy',String(busy));}
+    async function save(action){
+      error.hidden=true;const input=readForm();
+      if(action==='publish'){
+        const missing=[['title','카드 제목'],['contentTitle','콘텐츠명'],['videoUrl','영상 URL'],['description','장면 소개'],['quizQuestion','퀴즈 질문'],['correctChoiceId','정답'],['quizExplanation','정답 해설']].find(([key])=>!input[key]);
+        if(missing){showError(new Error(missing[1]+'을(를) 입력해 주세요.'),error);form.querySelector('[name='+missing[0]+']').focus();return;}
+        if(input.quizOptions.some(o=>!o.text)){showError(new Error('모든 선택지 내용을 입력해 주세요.'),error);return;}
+        if(!confirm(c.status==='published'?'수정한 내용을 갤러리에 바로 반영할까요?':'카드를 갤러리에 바로 공개할까요?'))return;
+      }
+      if(action==='draft'&&c.status==='published'&&!confirm('갤러리에서 이 카드를 숨기고 작성 중으로 저장할까요?'))return;
+      if(input.tags.length>3){showError(new Error('태그는 최대 3개까지 입력할 수 있습니다.'),error);return;}
+      if(input.videoUrl){try{videoInfo(input.videoUrl);}catch(e){showError(e,error);return;}}
+      setBusy(true);
+      try{const saved=await api('saveCard',state.session.token,input,action);state.editorDirty=false;state.workspace.cards=state.workspace.cards.filter(x=>x.cardId!==saved.cardId).concat(saved);renderEditor(saved);toast(action==='publish'?'카드를 공개했습니다. 갤러리에 바로 반영됩니다.':'임시저장했습니다.');await loadGallery(true);}
+      catch(e){showError(e,error);if(e.code!=='UNCERTAIN')setBusy(false);}
+    }
+  }
+
+  /** 교수자는 상태·팀 필터, 상세 검토와 팀 설정을 관리합니다. */
+  function renderAdmin() {
+    const panel=$('#admin-page');panel.replaceChildren(pageHeading('교수자 관리','팀별 카드를 확인하고 작성 팀에게 비공개 코멘트를 남겨 주세요. 공개에 승인은 필요하지 않습니다.',[button('목록 새로고침','secondary',()=>loadWorkspace('admin'))]));
+    const teamSelect=selectField('팀 필터','admin-team',[['all','전체 팀'],...state.workspace.teams.map(t=>[t.teamId,t.sortOrder+'팀 · '+t.teamName])],'all'),statusSelect=selectField('상태 필터','admin-status',[['all','모든 상태'],...Object.entries(statusNames)],'all');
+    const list=el('div',{class:'workspace-list'});panel.append(el('div',{class:'admin-filters'},teamSelect,statusSelect),list);
+    function draw(){const cards=state.workspace.cards.filter(c=>(teamSelect.querySelector('select').value==='all'||c.teamId===teamSelect.querySelector('select').value)&&(statusSelect.querySelector('select').value==='all'||c.status===statusSelect.querySelector('select').value)).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));list.replaceChildren(...cards.map(c=>el('article',{class:'work-item'},el('div',{},badge(c),el('h3',{},c.title||'제목 없는 카드'),el('p',{},teamName(c.teamId)+' · '+formatDate(c.updatedAt)+' · 버전 '+c.version)),button('카드·코멘트 보기','secondary',()=>openReview(c)))));if(!cards.length)list.append(el('p',{class:'empty-group'},'조건에 맞는 카드가 없습니다.'));}
+    teamSelect.addEventListener('change',draw);statusSelect.addEventListener('change',draw);draw();
+    const manager=el('section',{class:'team-manager'},el('p',{class:'eyebrow'},'TEAM SETTINGS'),el('h2',{},'팀 정보와 편집 코드'),el('p',{class:'help-text'},'팀을 추가하거나 정렬 번호를 변경할 수 있습니다. 비활성 팀의 공개 카드는 갤러리에서 숨겨지고 팀 로그인이 차단됩니다. 코드 변경 시 해당 팀의 기존 로그인은 모두 만료됩니다.'));
+    state.workspace.teams.forEach(t=>manager.append(teamSettings(t)));manager.append(teamSettings());panel.append(manager);
+    const adminForm=el('form',{class:'editor-section'},el('h2',{},'관리자 코드 변경'),field('새 관리자 코드 (5~15자)','newAdminCode','','password',true));adminForm.querySelector('input').maxLength=15;adminForm.querySelector('input').minLength=5;adminForm.querySelector('input').autocomplete='new-password';
+    const change=el('button',{type:'submit',class:'secondary'},'관리자 코드 변경'),error=errorBox();adminForm.append(error,change);panel.append(adminForm);
+    adminForm.addEventListener('submit',async e=>{e.preventDefault();if(!confirm('관리자 코드를 변경하면 모든 관리자 로그인이 만료됩니다. 계속할까요?'))return;change.disabled=true;try{await api('changeAdminCode',state.session.token,new FormData(adminForm).get('newAdminCode'));clearSession();toast('관리자 코드가 변경되었습니다. 다시 로그인해 주세요.');navigate('admin');}catch(err){showError(err,error);}finally{change.disabled=false;}});
+  }
+  function teamSettings(t) {
+    const count=t?state.workspace.cards.filter(c=>c.teamId===t.teamId).length:0;
+    const details=el('details',{class:'team-setting'},el('summary',{},t?(t.sortOrder+'팀 · '+t.teamName+' · 등록 '+count+'개 · 공개 '+state.workspace.cards.filter(c=>c.teamId===t.teamId&&c.status==='published').length+'개'+(!t.active?' · 비활성':'')):'+ 새로운 팀 추가'));
+    const form=el('form',{},el('div',{class:'field-grid'},field('팀 ID (변경 불가)','teamId',t?.teamId||'','text',true),field('팀명','teamName',t?.teamName||'','text',true)),field('팀 소개','teamDescription',t?.teamDescription||'','textarea'),field('팀 번호 / 표시 순서','sortOrder',t?.sortOrder||state.workspace.teams.length+1,'number',true),field(t?'새 편집 코드 (유지하려면 비워 두세요)':'편집 코드 (5~15자)','editCode','','password',!t),el('label',{class:'checkbox-field'},el('input',{type:'checkbox',name:'active',checked:t?t.active:true}),'활성 팀'));
+    form.querySelector('[name=teamId]').maxLength=40;form.querySelector('[name=teamId]').pattern='[A-Za-z0-9_-]{1,40}';if(t)form.querySelector('[name=teamId]').readOnly=true;form.querySelector('[name=teamName]').maxLength=100;form.querySelector('[name=teamDescription]').maxLength=500;const code=form.querySelector('[name=editCode]');code.maxLength=15;code.minLength=5;code.autocomplete='new-password';form.querySelector('[name=sortOrder]').min=1;form.querySelector('[name=sortOrder]').max=999;
+    const error=errorBox(),submit=el('button',{type:'submit',class:'secondary'},t?'팀 정보 저장':'팀 추가');form.append(error,submit);details.append(form);
+    form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;const d=new FormData(form);try{await api('saveTeam',state.session.token,{teamId:d.get('teamId'),teamName:d.get('teamName'),teamDescription:d.get('teamDescription'),sortOrder:Number(d.get('sortOrder')),editCode:d.get('editCode'),active:d.has('active')});toast('팀 정보를 저장했습니다.');await loadGallery(true);await loadWorkspace('admin');}catch(err){showError(err,error);}finally{submit.disabled=false;}});return details;
+  }
+  function openReview(c) {
+    openViewer('TEAM FEEDBACK · '+teamName(c.teamId));
+    const body=el('div',{class:'flip-stage'},badge(c),videoBlock(c.videoUrl),el('p',{class:'scene-description'},c.description),el('section',{class:'analysis-section'},el('h3',{},'퀴즈 질문과 선택지'),el('p',{},c.quizQuestion),c.quizOptions.map(o=>el('p',{},o.id+'. '+o.text))),analysisCard(c));
+    const review=el('div',{class:'review-actions'},field('작성 팀만 보는 교수자 코멘트','feedback',c.teacherFeedback,'textarea'),el('p',{class:'help-text'},'작성 팀과 교수자만 확인할 수 있습니다. 저장해도 카드 공개 상태는 바뀌지 않습니다. 코멘트를 비우고 저장하면 삭제됩니다.'));
+    const error=errorBox();review.append(error);
+    [['comment','코멘트 저장','primary',true],['archive','비공개 보관','danger-button',c.status!=='archived'],['restore','보관 해제','secondary',c.status==='archived']].filter(x=>x[3]).forEach(([action,label,cls])=>review.append(button(label,cls,async()=>{
+      if(!confirm(label+' 처리할까요?'))return;review.querySelectorAll('button').forEach(b=>b.disabled=true);error.hidden=true;
+      try{await api('reviewCard',state.session.token,c.cardId,Number(c.version),action,review.querySelector('textarea').value);closeViewer();toast(action==='comment'?'팀 전용 코멘트를 저장했습니다.':'카드 상태를 변경했습니다.');await loadGallery(true);await loadWorkspace('admin');}
+      catch(e){showError(e,error);if(e.code!=='UNCERTAIN')review.querySelectorAll('button').forEach(b=>b.disabled=false);}
+    })));
+    body.append(review);$('#viewer-content').append(body);
+  }
+
+  /** 공통 이벤트를 연결하고 데이터와 기존 세션을 복원합니다. */
+  document.querySelectorAll('[data-nav]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.nav)));
+  document.querySelectorAll('a[href="#gallery"]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();navigate('gallery');window.scrollTo({top:0});}));
+  $('#search').addEventListener('input',e=>{state.search=e.target.value.trim().toLocaleLowerCase();renderGallery();});
+  $('#sort').addEventListener('change',e=>{state.sort=e.target.value;renderGallery();});
+  $('#close-viewer').addEventListener('click',closeViewer);
+  $('#viewer').addEventListener('cancel',e=>{e.preventDefault();closeViewer();});
+  $('#viewer').addEventListener('click',e=>{if(e.target===$('#viewer')){const r=$('#viewer').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeViewer();}});
+  $('#logout').addEventListener('click',async()=>{if(state.editorDirty&&!confirm('저장하지 않은 내용이 있습니다. 로그아웃할까요?'))return;try{await api('logout',state.session.token);state.editorDirty=false;clearSession();await navigate('gallery');toast('로그아웃했습니다.');}catch(e){showError(e);}});
+  window.addEventListener('beforeunload',e=>{if(state.editorDirty){e.preventDefault();e.returnValue='';}});
+  window.addEventListener('offline',()=>toast('인터넷 연결이 끊겼습니다. 저장 전 연결을 확인하고 입력 내용을 보관해 주세요.',true));
+  restoreSession();if(window.KSC_PREVIEW)$('#preview-banner').hidden=false;loadGallery();
+  setInterval(()=>{if(state.page==='gallery'&&!document.hidden&&!$('#viewer').open)loadGallery(true);},60000);
+  // 외부 링크의 원본 영상 버튼은 항상 제공하여 임베드 차단 상황에서도 접근할 수 있게 합니다.
+})();
+</script>

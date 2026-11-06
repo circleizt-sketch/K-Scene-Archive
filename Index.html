@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>K-Scene Archive</title>
+  <?!= include_('Styles'); ?>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 이동</a>
+  <header class="header">
+    <a href="#gallery" class="brand" aria-label="K-Scene Archive 홈"><span class="brand-mark" aria-hidden="true">K<span>:</span></span><span>K-Scene <b>Archive</b></span></a>
+    <nav aria-label="주 메뉴">
+      <button class="nav-link active" data-nav="gallery">전체 카드</button>
+      <button class="nav-link" data-nav="teams">팀별 보기</button>
+      <button class="nav-link" data-nav="workspace">내 팀 작업실 <span aria-hidden="true">↗</span></button>
+      <button class="nav-link" data-nav="admin">교수자 관리</button>
+    </nav>
+    <button id="logout" class="text-button" hidden>로그아웃</button>
+  </header>
+  <div id="preview-banner" class="preview-banner" hidden>미리보기 모드 · 가상 상황 4개 · 저장과 로그인은 Google Apps Script 배포 후 사용할 수 있습니다.</div>
+  <main id="main" tabindex="-1">
+    <section id="gallery-page">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy"><p class="eyebrow"><span class="small-dot"></span> K-CULTURE × KOREAN LANGUAGE</p><h1 id="hero-title">K-콘텐츠 속<br>한국어를 <span>발견하다</span><span class="title-dot">.</span></h1><p class="hero-description">장면을 보고, 표현을 선택하고,<br class="mobile-only"> 숨겨진 의미를 탐색해 보세요.</p><div class="hero-meta"><span class="mini-icon" aria-hidden="true">▤</span> 함께 만드는 우리들의 한국어 아카이브 <span class="meta-line"></span> <span id="hero-count">불러오는 중</span></div></div>
+        <div class="hero-art" aria-hidden="true"><div class="art-caption">EVERY SCENE TELLS A STORY</div><div class="art-card art-back"><div class="art-lines"></div><span>말 너머의 의미를 발견하는 시간</span><b>SCENE 02</b></div><div class="art-card art-front"><span class="art-label">오늘의 한 장면</span><div class="art-quote">“밥 한번<br>먹자.”</div><span class="art-tag">인사일까, 약속일까?</span><div class="art-bottom"><span>K-Scene Archive</span><span>↗</span></div></div><div class="art-sticker">작은 장면,<br>새로운 발견 <span>✳</span></div></div>
+      </section>
+      <section class="collection" aria-labelledby="collection-title">
+        <div class="section-heading"><div><p class="eyebrow">OUR SCENE COLLECTION</p><h2 id="collection-title">장면으로 만나는 한국어 <span id="collection-count" class="count-badge">0</span></h2></div><p>함께 보고, 다르게 읽는 K-콘텐츠</p></div>
+        <div class="gallery-tools"><div id="team-tabs" class="tabs" role="group" aria-label="팀 필터"></div><label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="제목이나 태그로 찾아보세요" aria-label="카드 제목 또는 태그 검색"></label></div>
+        <div class="filter-row"><div id="tag-filters" class="tag-filters" role="group" aria-label="태그 필터"></div><label class="sort-label">정렬 <select id="sort"><option value="latest">최신 등록순</option><option value="title">제목순</option></select></label></div>
+        <div id="gallery-status" class="state-message" role="status">장면을 불러오고 있어요…</div>
+        <div id="team-groups"></div>
+      </section>
+      <aside class="learning-note"><span class="note-icon" aria-hidden="true">↻</span><div><b>한 번의 선택, 한 걸음 더 깊은 이해</b><p>정답을 맞히는 것보다 중요한 건, 그 표현이 쓰인 이유를 함께 생각하는 일이에요.</p></div><span class="note-end" aria-hidden="true">K-SCENE NOTES</span></aside>
+    </section>
+    <section id="workspace-page" class="workspace page-section" hidden></section>
+    <section id="admin-page" class="page-section" hidden></section>
+    <section id="login-page" class="page-section" hidden></section>
+  </main>
+  <footer><a href="#gallery" class="footer-brand">K-Scene Archive<span>장면을 모으고, 의미를 연결하다.</span></a><span>K-대중문화와 생성형 AI로 배우는 한국어</span><span>함께 배우는 한국어, 함께 만드는 기록.</span></footer>
+  <dialog id="viewer" class="viewer" aria-labelledby="viewer-title"><div class="viewer-header"><span id="viewer-label">SCENE EXPLORER</span><button id="close-viewer" class="icon-button" aria-label="카드 닫기">✕</button></div><div id="viewer-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <?!= include_('Scripts'); ?>
+</body>
+</html>
